@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: '首次选 discover 查看课程名称与 ID；填好订阅后，用 mail-test 测邮箱，再选 run 归档'
+        description: '首次选 discover 查看课程名称与 ID；配置订阅及发送方式后，选 run 归档'
         type: choice
         options: [discover, mail-test, run]
         default: discover
@@ -39,7 +39,8 @@ jobs:
       RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
       MAIL_FROM: ${{ secrets.MAIL_FROM }}
       MAIL_MAX_RAW_MB: ${{ vars.MAIL_MAX_RAW_MB || '18' }}
-      DELIVERY: email
+      DELIVERY: ${{ vars.DELIVERY || 'email' }}
+      RELAY_KEY: ${{ secrets.RELAY_KEY }}
       MAX_LECTURES: ${{ inputs.max_lectures || vars.MAX_LECTURES || '3' }}
       STATE_KEY: ${{ secrets.STATE_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
@@ -76,9 +77,22 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y ffmpeg
           fi
-      - name: 归档已订阅课程并发送邮件
+      - name: 归档已订阅课程
         if: env.COURSE_OPERATION == 'run'
         run: node src/run.mjs
+      - name: 上传加密附件供本机取件
+        id: upload_relay
+        if: always() && !cancelled() && env.COURSE_OPERATION == 'run' && env.DELIVERY == 'relay' && hashFiles('local-data/relay-outbox/*.relay') != ''
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: course-relay-${{ github.run_id }}-${{ github.run_attempt }}
+          path: local-data/relay-outbox/*.relay
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: error
+      - name: 记录已上传的附件
+        if: always() && steps.upload_relay.outcome == 'success'
+        run: node src/run.mjs --commit-relay
       - name: Preserve successful delivery receipts
         if: always() && env.COURSE_OPERATION == 'run' && hashFiles('local-data/state/delivery-state.enc') != ''
         uses: actions/cache/save@v6.1.0

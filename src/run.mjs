@@ -11,16 +11,18 @@ import { sendEmail, sendQQ } from './delivery.mjs';
 import { loadRemoteState, saveRemoteState, statePassword } from './state.mjs';
 import { resolveCourseSelection } from './subscriptions.mjs';
 import { safeMessage } from './logging.mjs';
+import { RELAY_DIR, relayFilename, relayKey, stageRelay } from './relay-envelope.mjs';
 
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const catalogPath = join(root, 'local-data/catalog.private.json');
+const ledger = join(root, 'local-data/state/delivery.json');
 const TRANSCRIPT_RETRY_MS = 48 * 60 * 60 * 1000;
 try { process.loadEnvFile(join(root, '.env')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 
 export function deliveryChannels(value) {
   const mode = value || 'none';
-  if (!['none', 'email', 'qq', 'both'].includes(mode)) throw new Error('DELIVERY 需为 none、email、qq 或 both。');
+  if (!['none', 'email', 'qq', 'both', 'relay'].includes(mode)) throw new Error('DELIVERY 需为 none、email、qq、both 或 relay。');
   return mode === 'both' ? ['email', 'qq'] : mode === 'none' ? [] : [mode];
 }
 
@@ -60,7 +62,33 @@ export function courseDiscoverySummary(courses, repository) {
   return ['## 课程名称与订阅 ID', '', '| 课程名称 | 课程 ID（courseinfoid） |', '| --- | --- |', ...rows, '',
     `1. 复制目标课程右侧的数字，打开[编辑订阅清单](${edit})。`,
     '2. 将数字加上英文双引号，填入 `course_ids` 数组。多门课程用英文逗号分隔，提交到 `data` 分支。',
-    '3. 邮箱配置完成后先运行 `mail-test` 确认收件，再运行 `run` 处理已订阅课程。', '', ''].join('\n');
+    '3. 配好发送方式后运行 `run` 处理已订阅课程；使用邮箱时可先跑 `mail-test`。', '', ''].join('\n');
+}
+
+export function recordRelayUploads(state, wasUploaded, timestamp) {
+  let count = 0;
+  for (const [id, done] of Object.entries(state.completed)) {
+    for (const [kind, receipt] of [['pptx', 'relayPptx'], ['docx', 'relay']]) {
+      if (!wasUploaded(id, kind)) continue;
+      done[receipt] = timestamp;
+      count++;
+    }
+  }
+  return count;
+}
+
+async function commitRelay() {
+  if (process.env.GITHUB_ACTIONS !== 'true' || process.env.DELIVERY !== 'relay' || !process.env.GITHUB_TOKEN) {
+    throw new Error('仅在 Actions 完成加密产物上传后记录交接。');
+  }
+  const key = relayKey(process.env.RELAY_KEY);
+  const state = JSON.parse(await readFile(ledger, 'utf8'));
+  const count = recordRelayUploads(state, (id, kind) => existsSync(join(root, RELAY_DIR, relayFilename(key, id, kind))),
+    new Date().toISOString());
+  if (!count) throw new Error('没有与本轮处理记录对应的加密附件。');
+  await saveJson(ledger, state);
+  await saveRemoteState(ledger);
+  console.log(`已记录 ${count} 个上传成功的加密附件；微信发送状态保存在转发电脑。`);
 }
 
 async function listCourses() {
@@ -87,7 +115,8 @@ async function listCourses() {
 }
 
 async function run() {
-  const { values } = parseArgs({ options: { help: { type: 'boolean' }, discover: { type: 'boolean' }, 'mail-test': { type: 'boolean' } } });
+  const { values } = parseArgs({ options: { help: { type: 'boolean' }, discover: { type: 'boolean' }, 'mail-test': { type: 'boolean' }, 'commit-relay': { type: 'boolean' } } });
+  if (values['commit-relay']) return commitRelay();
   if (values.help) {
     console.log('课程订阅归档\n  node src/run.mjs --discover   列出课程名称和 courseinfoid\n  node src/run.mjs --mail-test  测试邮箱\n  node src/run.mjs              处理已订阅课程');
     return;
@@ -112,8 +141,10 @@ async function run() {
     : '尚无订阅课程。请先运行 node src/run.mjs --discover，再在 .env 填写 COURSE_IDS。');
   const channels = deliveryChannels(process.env.DELIVERY);
   if (process.env.GITHUB_ACTIONS === 'true' && !channels.length) {
-    throw new Error('Actions 请配置 DELIVERY=email；云端不会公开上传课程附件。');
+    throw new Error('Actions 请设置 DELIVERY=email 或 DELIVERY=relay。');
   }
+  if (!hosted && channels.includes('relay')) throw new Error('DELIVERY=relay 由 GitHub Actions 运行；本机仅启动转发脚本。');
+  const key = channels.includes('relay') ? relayKey(process.env.RELAY_KEY) : null;
   if (process.env.GITHUB_TOKEN && process.env.GITHUB_REPOSITORY) statePassword();
   if (channels.includes('email') &&
       (!(process.env.SMTP_USERNAME || process.env.SMTP_EMAIL) ||
@@ -129,7 +160,6 @@ async function run() {
   const work = resolve(root, process.env.COURSE_WORK || 'local-data/jobs');
   const runCatalogPath = join(work, 'subscriptions-run.private.json');
   const output = resolve(root, process.env.COURSE_OUTPUT || 'local-data/final');
-  const ledger = join(root, 'local-data/state/delivery.json');
   const lock = join(root, 'local-data/run.lock');
   await mkdir(join(root, 'local-data/state'), { recursive: true });
 
@@ -145,6 +175,7 @@ async function run() {
 
   try {
     await handle.writeFile(String(process.pid));
+    if (key) await rm(join(root, RELAY_DIR), { recursive: true, force: true });
     await loadRemoteState(ledger);
     let state = { completed: {} };
     try {
@@ -192,6 +223,10 @@ async function run() {
         for (const channel of channels) {
           const attachments = deliveryFiles(files, done, channel);
           if (!attachments.length) continue;
+          if (channel === 'relay') {
+            await stageRelay(join(root, RELAY_DIR), id, attachments, key);
+            continue;
+          }
           if (channel === 'email') await sendEmail(attachments);
           else await sendQQ(attachments, output);
           const receipt = files.docx ? channel : `${channel}Pptx`;

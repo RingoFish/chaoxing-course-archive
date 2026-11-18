@@ -4,7 +4,7 @@ import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
 import { publishedReplays, courseListParameters, courseRecordParameters, selectCourses } from '../src/discover.mjs';
 import { encryptLoginField, loginWithSecrets } from '../src/auth.mjs';
 import { encryptState, decryptState, statePassword, mergeState } from '../src/state.mjs';
-import { courseDiscoverySummary, deliveryChannels, deliveryFiles, pendingReplays } from '../src/run.mjs';
+import { courseDiscoverySummary, deliveryChannels, deliveryFiles, pendingReplays, recordRelayUploads } from '../src/run.mjs';
 import { safeMessage } from '../src/logging.mjs';
 import { readFile } from 'node:fs/promises';
 import YAML from 'yaml';
@@ -115,10 +115,23 @@ test('Actions default to course discovery and keep video processing separate', a
   assert.equal(steps.find(s => s.run === 'node src/run.mjs --discover').if, "env.COURSE_OPERATION == 'discover'");
   assert.equal(steps.find(s => s.run === 'node src/run.mjs --mail-test').if, "env.COURSE_OPERATION == 'mail-test'");
   assert.equal(steps.find(s => s.run === 'node src/run.mjs').if, "env.COURSE_OPERATION == 'run'");
-  assert.ok(!workflow.jobs.course.steps.some(s => s.uses?.startsWith('actions/upload-artifact')));
+  const uploads = steps.filter(s => s.uses?.startsWith('actions/upload-artifact'));
+  assert.equal(uploads.length, 1);
+  assert.match(uploads[0].if, /env\.DELIVERY == 'relay'/);
+  assert.equal(uploads[0].with.path, 'local-data/relay-outbox/*.relay');
+  assert.match(steps.find(s => s.run === 'node src/run.mjs --commit-relay').if, /steps\.upload_relay\.outcome == 'success'/);
   for (const step of workflow.jobs.course.steps.filter(s => s.uses?.startsWith('actions/cache/'))) {
     assert.equal(step.with.path, 'local-data/state/delivery-state.enc');
   }
+});
+
+test('a partially uploaded relay only records the file that exists', () => {
+  const state = { completed: { 42: { pptxBuilt: 't', built: 't', transcriptRetryAt: null } } };
+  assert.deepEqual(deliveryChannels('relay'), ['relay']);
+  assert.equal(recordRelayUploads(state, (id, kind) => id === '42' && kind === 'pptx', 'uploaded'), 1);
+  assert.deepEqual(deliveryFiles({ pptx: 'slides.pptx', docx: 'lecture.docx' }, state.completed[42], 'relay'), ['lecture.docx']);
+  assert.equal(recordRelayUploads(state, (_id, kind) => kind === 'docx', 'next'), 1);
+  assert.deepEqual(pendingReplays([{ speechId: 42 }], state, ['relay']), []);
 });
 
 test('course discovery pairs each name with its ID and links to the current fork', () => {
