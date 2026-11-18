@@ -61,11 +61,21 @@ export async function discover(value, {
         withoutToken.searchParams.delete('space_token');
         const canonical = new URL('/starcloud/list?type=2&ut=s', entry.origin);
         const probes = [['configured', entry], ['without-space-token', withoutToken], ['canonical', canonical]];
+        probes.push(['personal-space', new URL('https://i.chaoxing.com/')], ['configured-after-personal-space', entry]);
+        const cookieCounts = async () => {
+          const { cookies } = await context.request.storageState();
+          const count = host => cookies.filter(cookie => {
+            const domain = cookie.domain.replace(/^\./, '');
+            return host === domain || (cookie.domain.startsWith('.') && host.endsWith('.' + domain));
+          }).length;
+          return { personal: count('i.chaoxing.com'), course: count(entry.hostname) };
+        };
         const seenProbes = new Set();
         for (const [label, target] of probes) {
-          if (seenProbes.has(target.href)) continue;
+          if (seenProbes.has(target.href) && label !== 'configured-after-personal-space') continue;
           seenProbes.add(target.href);
           try {
+            const before = await cookieCounts();
             const reply = await context.request.get(target.href, { timeout: 25000 });
             const finalUrl = new URL(reply.url());
             const html = await reply.text();
@@ -81,6 +91,14 @@ export async function discover(value, {
               inputIsList: target.pathname === '/starcloud/list',
               inputHasSpaceToken: target.searchParams.has('space_token'),
               inputHasS: target.searchParams.has('s'),
+              cookiesBefore: before, cookiesAfter: await cookieCounts(),
+              contentKind: /html/i.test(reply.headers()['content-type'] || '') ? 'html' : /json/i.test(reply.headers()['content-type'] || '') ? 'json' : 'other',
+              bodyLength: html.length,
+              titleKind: /智播课堂/.test(doc('title').text()) ? 'course' : /登录|login/i.test(doc('title').text()) ? 'login' : /个人空间/.test(doc('title').text()) ? 'personal-space' : doc('title').text().trim() ? 'other' : 'none',
+              textLength: doc('body').clone().find('script,style').remove().end().text().trim().length,
+              scripts: doc('script').length, frames: doc('iframe,frame').length, forms: doc('form').length,
+              personalSpaceMarker: Boolean(doc('#siteName, #frame_content').length),
+              authMarker: /非法访问|访问异常|登录失效|请先登陆|请先登录|身份认证|统一认证|重新登录|账号异常|身份验证|安全校验|安全验证|身份校验|请使用.*浏览器/i.test(html),
               fid: filled('fid'), term: filled('xn') && filled('xq'),
               courseListContainer: Boolean(doc('#modellistDiv, .modellistDiv').length),
               loginForm: Boolean(doc('input[type="password"], #loginBtn').length),
