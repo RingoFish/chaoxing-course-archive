@@ -56,6 +56,45 @@ export async function discover(value, {
   try {
     let state;
     if (apiOnly) {
+      if (process.env.GITHUB_ACTIONS === 'true') {
+        const withoutToken = new URL(entry);
+        withoutToken.searchParams.delete('space_token');
+        const canonical = new URL('/starcloud/list?type=2&ut=s', entry.origin);
+        const probes = [['configured', entry], ['without-space-token', withoutToken], ['canonical', canonical]];
+        const seenProbes = new Set();
+        for (const [label, target] of probes) {
+          if (seenProbes.has(target.href)) continue;
+          seenProbes.add(target.href);
+          try {
+            const reply = await context.request.get(target.href, { timeout: 25000 });
+            const finalUrl = new URL(reply.url());
+            const html = await reply.text();
+            const doc = load(html);
+            const filled = id => Boolean(doc(`[id="${id}"]`).first().attr('value'));
+            const destination = finalUrl.hostname === entry.hostname
+              ? finalUrl.pathname === '/starcloud/list' ? 'course-list' : 'other-course-host-page'
+              : finalUrl.hostname === 'passport2.chaoxing.com' ? 'passport'
+                : finalUrl.hostname === 'i.chaoxing.com' ? 'personal-space' : 'other-host';
+            console.log('COURSE_ENTRY_CHECK ' + JSON.stringify({
+              probe: label, status: reply.status(), destination,
+              redirected: finalUrl.href !== target.href,
+              inputIsList: target.pathname === '/starcloud/list',
+              inputHasSpaceToken: target.searchParams.has('space_token'),
+              inputHasS: target.searchParams.has('s'),
+              fid: filled('fid'), term: filled('xn') && filled('xq'),
+              courseListContainer: Boolean(doc('#modellistDiv, .modellistDiv').length),
+              loginForm: Boolean(doc('input[type="password"], #loginBtn').length),
+              captchaMention: /验证码|captcha/i.test(doc('body').text()),
+              unauthorizedMessage: /无权限|未登录|请登录|登录超时|访问受限|not authorized|access denied/i.test(doc('body').text()),
+              invalidParameterMessage: /参数错误|参数无效|链接失效|链接过期/i.test(doc('body').text()),
+              htmlRedirectMarker: /location\.(?:href|replace|assign)|http-equiv=["']refresh/i.test(html),
+            }));
+          } catch {
+            console.log('COURSE_ENTRY_CHECK ' + JSON.stringify({ probe: label, requestFailed: true }));
+          }
+        }
+        throw new Error('Course entry diagnostics finished.');
+      }
       const response = await context.request.get(entry.href);
       const $ = load(await response.text());
       const v = id => $(`[id="${id}"]`).first().attr('value') || '';
