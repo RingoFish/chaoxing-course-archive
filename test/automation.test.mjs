@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
 import { publishedReplays, courseListParameters, courseRecordParameters, selectCourses } from '../src/discover.mjs';
 import { encryptLoginField, loginWithSecrets } from '../src/auth.mjs';
-import { encryptState, decryptState, statePassword, mergeState } from '../src/state.mjs';
+import { encryptState, decryptState, loadRemoteState, saveRemoteState, statePassword, mergeState } from '../src/state.mjs';
 import { courseDiscoverySummary, deliveryChannels, deliveryFiles, pendingReplays, recordRelayUploads } from '../src/run.mjs';
 import { safeMessage } from '../src/logging.mjs';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import YAML from 'yaml';
 
 test('discovery includes only playable published records', () => {
@@ -71,6 +73,44 @@ test('encrypted delivery state uses icourse-compatible Salted__ envelope', () =>
   assert.deepEqual(JSON.parse(Buffer.concat([cipher.update(blob.subarray(16)), cipher.final()]).toString()), value);
   assert.throws(() => decryptState(blob, 'wrong'), /解密失败/);
   assert.deepEqual(mergeState(value, { completed: { '1': { qq: 'later' } } }).completed['1'], { email: '2026-11-16', qq: 'later' });
+});
+
+test('remote delivery receipts use the Git blob matching the optimistic update SHA', async t => {
+  const env = { GITHUB_REPOSITORY: 'example/course', GITHUB_TOKEN: 'fixture-token', STATE_KEY: 'fixture-key' };
+  const oldEnv = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  const directory = await mkdtemp(join(tmpdir(), 'receipt-test-'));
+  t.after(async () => {
+    for (const [key, value] of Object.entries(oldEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
+  const path = join(directory, 'state.json');
+  const sha = 'a'.repeat(40);
+  const existing = { completed: { 1: { email: 'existing' } } };
+  const raw = encryptState(existing, env.STATE_KEY);
+  let update;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url.endsWith('/git/blobs/' + sha)) {
+      return Response.json({ sha, size: raw.length, encoding: 'base64', content: raw.toString('base64') });
+    }
+    if (options.method === 'PUT') {
+      update = JSON.parse(options.body);
+      return Response.json({}, { status: 200 });
+    }
+    assert.match(url, /\/contents\/data\/delivery-state\.enc\?ref=data$/);
+    return Response.json({ sha, encoding: 'base64', content: 'inconsistent-inline-body' });
+  });
+  await loadRemoteState(path);
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), existing);
+  await writeFile(path, JSON.stringify({ completed: { 1: { relay: 'new' } } }));
+  await saveRemoteState(path);
+  assert.equal(update.sha, sha);
+  assert.deepEqual(decryptState(Buffer.from(update.content, 'base64'), env.STATE_KEY), {
+    completed: { 1: { email: 'existing', relay: 'new' } },
+  });
 });
 
 test('incremental delivery continues the unfinished channel and prioritizes recent lectures', () => {

@@ -122,7 +122,10 @@ async function sendWechat(config, talker, { meta, data }) {
 export async function processArtifact(config, key, artifact, cache, state, persist, send) {
   const path = join(cache, `${artifact.id}.zip`);
   try { await access(path); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; await downloadArtifact(config, artifact, path); }
+  catch (error) {
+    if (error.code !== 'ENOENT' || artifact.local) throw error;
+    await downloadArtifact(config, artifact, path);
+  }
   const tar = process.platform === 'win32' ? join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe') : 'tar';
   const { stdout } = await exec(tar, ['-tf', path], { timeout: 60000, maxBuffer: 128 * 1024 });
   const names = stdout.trim().split(/\r?\n/);
@@ -161,8 +164,11 @@ export async function processArtifact(config, key, artifact, cache, state, persi
 async function main() {
   const { values: args } = parseArgs({ options: {
     config: { type: 'string', default: 'local-data/wechat-relay/config.json' },
-    check: { type: 'boolean' }, resolve: { type: 'string' }, sent: { type: 'boolean' }, retry: { type: 'boolean' },
+    check: { type: 'boolean' }, 'inbox-only': { type: 'boolean' },
+    resolve: { type: 'string' }, sent: { type: 'boolean' }, retry: { type: 'boolean' },
   } });
+  const inboxOnly = args['inbox-only'];
+  if (inboxOnly && (args.check || args.resolve)) throw new Error('--inbox-only 不能与 --check 或 --resolve 同用。');
   const configPath = resolve(args.config);
   const config = await readJson(configPath);
   if (!/^[\w.-]+\/[\w.-]+$/.test(config.repository || '') || !config.contact ||
@@ -195,11 +201,11 @@ async function main() {
     }
     const talker = await checkWechat(config);
     if (!config.talker && !args.check) throw new Error('请先用 --check 绑定微信联系人。');
-    if (!config.githubToken) {
+    if (!config.githubToken && !inboxOnly) {
       if (args.check && !config.talker) await store(configPath, { ...config, talker });
       throw new Error('微信接收对象核对通过；本机还缺少 GitHub Actions 只读令牌。');
     }
-    const artifacts = await getArtifacts(config);
+    const artifacts = inboxOnly ? [] : await getArtifacts(config);
     if (args.check) {
       if (!config.talker) await store(configPath, { ...config, talker });
       console.log(`微信接收对象核对通过。GitHub 可读，有 ${artifacts.length} 个有效交接包。`);
@@ -209,7 +215,9 @@ async function main() {
     const remoteIds = new Set(artifacts.map(item => String(item.id)));
     // Finish cached work even if GitHub no longer lists the archive.
     for (const name of await readdir(cache)) {
-      if (/^\d+\.zip$/.test(name) && !remoteIds.has(name.slice(0, -4))) artifacts.unshift({ id: name.slice(0, -4) });
+      if (/^\d+\.zip$/.test(name) && !remoteIds.has(name.slice(0, -4))) {
+        artifacts.unshift({ id: name.slice(0, -4), local: true });
+      }
     }
     let failures = 0;
     for (const artifact of artifacts) {

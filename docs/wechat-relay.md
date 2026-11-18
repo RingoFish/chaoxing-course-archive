@@ -37,6 +37,8 @@ node scripts/wechat-relay.mjs --check
 
 计划任务在当前 Windows 用户登录后每 15 分钟取件，无需保持终端打开。Windows 注销、睡眠或本机微信不可用时不会发送；恢复后下次运行继续。也可在机器上手动运行 `node scripts/wechat-relay.mjs` 立即取件。
 
+令牌暂时不可用时，可以在已经登录 GitHub 的电脑下载 Actions 里的加密 ZIP（无需解压），把它以 GitHub 产物 ID 命名为 `<产物ID>.zip`，放到 Windows 配置文件同级的 `inbox` 文件夹中，然后运行 `node scripts/wechat-relay.mjs --inbox-only`。这种方式仍核对绑定的联系人、文件真实性和本机发送记录，只处理已放入收件箱的文件。
+
 ## 补发、确认和限制
 
 - GitHub 与 Windows 分别记账。GitHub 只在加密包上传成功后记录已交接；本机按「回放 ID + PPTX / Word」分别记录微信发送。重新运行不会重复发送已确认的附件。

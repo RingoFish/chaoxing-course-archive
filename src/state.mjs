@@ -67,8 +67,17 @@ async function api(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
-function decodeRemote(remote, password) {
-  return decryptState(Buffer.from(remote.content.replace(/\s/g, ''), 'base64'), password);
+async function decodeRemote(remote, password) {
+  // Decode the immutable blob matching the SHA used for optimistic updates.
+  // The Contents API may return a stale inline body with current file metadata.
+  if (!/^[a-f0-9]{40}$/.test(remote.sha || '')) throw new Error('GitHub 发送记录缺少有效的文件版本。');
+  const blob = await api('git/blobs/' + remote.sha);
+  if (blob.sha !== remote.sha || blob.encoding !== 'base64' || typeof blob.content !== 'string') {
+    throw new Error('GitHub 发送记录文件格式无效。');
+  }
+  const raw = Buffer.from(blob.content, 'base64');
+  if (raw.length !== blob.size) throw new Error('GitHub 发送记录文件长度与响应不符。');
+  return decryptState(raw, password);
 }
 
 export async function loadRemoteState(path) {
@@ -89,7 +98,7 @@ export async function loadRemoteState(path) {
   const remote = current || legacy;
   if (!remote && !cached) return;
 
-  const remoteState = remote ? decodeRemote(remote, password) : { completed: {} };
+  const remoteState = remote ? await decodeRemote(remote, password) : { completed: {} };
   let local = { completed: {} };
   try {
     local = JSON.parse(await readFile(path, 'utf8'));
@@ -112,7 +121,7 @@ export async function saveRemoteState(path) {
     const current = await api('contents/' + STATE_PATH + '?ref=' + DATA_BRANCH, { allowMissing: true });
     const legacy = current ? null : await api('contents/' + LEGACY_PATH + '?ref=' + LEGACY_BRANCH, { allowMissing: true });
     const remote = current || legacy;
-    const state = remote ? mergeState(decodeRemote(remote, password), local) : local;
+    const state = remote ? mergeState(await decodeRemote(remote, password), local) : local;
     const payload = {
       message: 'chore(state): update encrypted delivery receipts',
       branch: DATA_BRANCH,
