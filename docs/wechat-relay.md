@@ -43,6 +43,6 @@ node scripts/wechat-relay.mjs --check
 
 - GitHub 与 Windows 分别记账。GitHub 只在加密包上传成功后记录已交接；本机按「回放 ID + PPTX / Word」分别记录微信发送。重新运行不会重复发送已确认的附件。
 - 字幕未生成时可以先发 PPTX。平台字幕出现后，下一次到期复查只交接 Word。
-- 文件最多 100 MiB／份。Actions 的加密产物保留 30 天；下载到本机的加密包可继续处理。要保留已发送记录，请勿删除本机 `state.json`。本机下载的压缩包在发送完成后清理。
-- 本机 `latest.stderr.log` 和 `previous-error.log` 可用于检查发送失败。若日志写明结果不确定，先在微信确认该文件，再执行 `node scripts/wechat-relay.mjs --resolve 1234:pptx --sent`（已经发出）或 `node scripts/wechat-relay.mjs --resolve 1234:pptx --retry`（确定没发出）。Word 用 `1234:docx`。微信拒绝发送草稿尚未清空的聊天；先处理草稿再重试。
+- 微信收到的是普通 ZIP，一包可包含多节课的 PPTX 和 Word。超过单包上限时，会拆成多个可独立解压的 ZIP。单份课件压缩后仍超过 100 MiB 时，转发会保留该文件待处理。Actions 的加密产物保留 30 天；下载到本机的加密包可继续处理。要保留已发送记录，请勿删除本机 `state.json`。本机下载的压缩包在发送完成后清理。
+- 本机 `latest.stderr.log` 和 `previous-error.log` 可用于检查发送失败。若日志写明结果不确定，先在微信确认该 ZIP 是否发出，再按日志列出的文件编号逐一核对，再执行 `node scripts/wechat-relay.mjs --resolve 1234:pptx --sent`（已经发出）或 `node scripts/wechat-relay.mjs --resolve 1234:pptx --retry`（确定没发出）。Word 用 `1234:docx`。微信拒绝发送草稿尚未清空的聊天；先处理草稿再重试。
 - 若上次突然中断且留下 `run.lock`，确认计划任务和手动脚本都已停止后再移除它。此前开始但没有确认的附件仍需核对。

@@ -39,3 +39,38 @@ test('confirmed files and uncertain sends are skipped independently', async () =
   assert.equal(await deliverRelayFile(docx, state, persist, send), 'needs-review');
   assert.deepEqual(sends, ['pptx', 'docx']);
 });
+
+test('relay sends an ordinary ZIP and remembers both members without resending', async t => {
+  const { execFileSync } = await import('node:child_process');
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { processArtifact, zipGroups } = await import('../scripts/wechat-relay.mjs');
+  const tar = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'tar.exe') : process.platform === 'darwin' ? 'tar' : 'bsdtar';
+  const dir = await mkdtemp(join(tmpdir(), 'relay-zip-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const key = randomBytes(32);
+  const metas = [meta, { ...meta, kind: 'docx', name: '讲义.docx' }];
+  const names = [];
+  for (const entry of metas) {
+    const name = relayFilename(key, entry.replay, entry.kind);
+    names.push(name);
+    await writeFile(join(dir, name), sealRelay(key, entry, content));
+  }
+  const archive = join(dir, '123.zip');
+  execFileSync(tar, ['-a', '-cf', archive, '-C', dir, '--', ...names]);
+  const state = { files: {}, artifacts: {} };
+  const send = async ({ meta: zip, data }) => {
+    assert.match(zip.name, /\.zip$/);
+    assert.ok(Object.values(state.files).every(entry => entry.status === 'sending'));
+    const out = join(dir, 'received.zip');
+    await writeFile(out, data);
+    assert.deepEqual(execFileSync(tar, ['-tf', out], { encoding: 'utf8' }).trim().split(/\r?\n/),
+      metas.map(item => item.replay + '-' + item.name));
+    for (const item of metas) assert.deepEqual(execFileSync(tar, ['-xOf', out, item.replay + '-' + item.name]), content);
+  };
+  assert.equal(await processArtifact({}, key, { id: 123 }, dir, state, () => {}, send), false);
+  assert.ok(state.artifacts[123]);
+  assert.equal(Object.values(state.files).filter(entry => entry.status === 'sent').length, 2);
+  assert.deepEqual(zipGroups([{ bytes: 6 }, { bytes: 6 }, { bytes: 3 }], 10).map(g => g.length), [1, 2]);
+});

@@ -26,6 +26,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y ffmpeg
           fi
+      - run: sudo apt-get install -y libarchive-tools
       - run: npm test
       - run: uv run --locked python -m unittest discover -s test -p 'test_*.py' -v
       - run: node test/smoke.mjs

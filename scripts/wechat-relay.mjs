@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { access, mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
-import { MAX_ARCHIVE, MAX_ENVELOPE, openRelay, relayFilename, relayKey } from '../src/relay-envelope.mjs';
+import { MAX_ARCHIVE, MAX_ENVELOPE, MAX_FILE, openRelay, relayFilename, relayKey } from '../src/relay-envelope.mjs';
 
 const exec = promisify(execFile);
 const API = 'https://api.github.com';
@@ -100,16 +101,50 @@ async function checkWechat(config) {
   return hits[0].username;
 }
 
+const fileId = meta => `${meta.replay}:${meta.kind}`;
+
+async function deliverZipMembers(ids, state, persist, send) {
+  for (const id of ids) state.files[id] = { status: 'sending', at: time() };
+  await persist();
+  await send();
+  for (const id of ids) state.files[id] = { status: 'sent', at: time() };
+  await persist();
+}
+
 export async function deliverRelayFile(file, state, persist, send) {
-  const id = `${file.meta.replay}:${file.meta.kind}`;
+  const id = fileId(file.meta);
   if (state.files[id]?.status === 'sent') return 'already-sent';
   if (state.files[id]?.status === 'sending') return 'needs-review';
-  state.files[id] = { status: 'sending', at: time() };
-  await persist();
-  await send(file);
-  state.files[id] = { status: 'sent', at: time() };
-  await persist();
+  await deliverZipMembers([id], state, persist, () => send(file));
   return 'sent';
+}
+
+export function zipGroups(entries, limit = MAX_FILE - 2 * 1024 * 1024) {
+  const groups = [];
+  let group = [], bytes = 0;
+  for (const entry of entries) {
+    if (group.length && bytes + entry.bytes > limit) { groups.push(group); group = []; bytes = 0; }
+    group.push(entry); bytes += entry.bytes;
+  }
+  if (group.length) groups.push(group);
+  return groups;
+}
+
+async function zipFiles(tar, archive, cache, key, entries) {
+  const temp = await mkdtemp(join(cache, 'zip-parts-'));
+  try {
+    const names = [];
+    for (const meta of entries) {
+      const { stdout: blob } = await exec(tar, ['-xOf', archive, meta.entry], { encoding: 'buffer', maxBuffer: MAX_ENVELOPE, timeout: 90000 });
+      const { data } = openRelay(key, blob);
+      const name = meta.replay + '-' + meta.name.replace(/[. ]+(?=\.(pptx|docx)$)/i, '');
+      names.push(name);
+      await writeFile(join(temp, name), data, { mode: 0o600, flag: 'wx' });
+    }
+    const output = join(temp, 'package.zip');
+    await exec(tar, ['-a', '-cf', output, '-C', temp, '--', ...names], { timeout: 180000 });
+    return (await stat(output)).size > MAX_FILE ? null : await readFile(output);
+  } finally { await rm(temp, { recursive: true, force: true }); }
 }
 
 async function sendWechat(config, talker, { meta, data }) {
@@ -126,7 +161,7 @@ export async function processArtifact(config, key, artifact, cache, state, persi
     if (error.code !== 'ENOENT' || artifact.local) throw error;
     await downloadArtifact(config, artifact, path);
   }
-  const tar = process.platform === 'win32' ? join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe') : 'tar';
+  const tar = process.platform === 'win32' ? join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe') : process.platform === 'darwin' ? 'tar' : 'bsdtar';
   const { stdout } = await exec(tar, ['-tf', path], { timeout: 60000, maxBuffer: 128 * 1024 });
   const names = stdout.trim().split(/\r?\n/);
   if (names.length > 1000 || new Set(names).size !== names.length ||
@@ -134,25 +169,47 @@ export async function processArtifact(config, key, artifact, cache, state, persi
   const index = [];
   for (const name of names) {
     const { stdout: blob } = await exec(tar, ['-xOf', path, name], { encoding: 'buffer', maxBuffer: MAX_ENVELOPE, timeout: 90000 });
-    const { meta } = openRelay(key, blob);
+    const { meta, data } = openRelay(key, blob);
     if (relayFilename(key, meta.replay, meta.kind) !== name) throw new Error('交接包文件名与内容不匹配。');
-    index.push({ ...meta, entry: name });
+    index.push({ ...meta, entry: name, bytes: data.length });
   }
   index.sort((a, b) => a.kind === b.kind ? a.replay.localeCompare(b.replay) : a.kind === 'pptx' ? -1 : 1);
   let needsReview = false;
-  for (const meta of index) {
-    const id = `${meta.replay}:${meta.kind}`;
-    if (state.files[id]?.status === 'sent') continue;
-    if (state.files[id]?.status === 'sending') { needsReview = true; continue; }
-    if (meta.kind === 'docx' && state.files[`${meta.replay}:pptx`]?.status !== 'sent') { needsReview = true; continue; }
-    const { stdout: blob } = await exec(tar, ['-xOf', path, meta.entry], { encoding: 'buffer', maxBuffer: MAX_ENVELOPE, timeout: 90000 });
-    const file = openRelay(key, blob);
-    try { await deliverRelayFile(file, state, persist, send); }
+  const sendGroup = async group => {
+    const pending = [];
+    const bundledPptx = new Set();
+    for (const meta of group) {
+      const id = fileId(meta);
+      if (state.files[id]?.status === 'sent') continue;
+      if (state.files[id]?.status === 'sending' || (meta.kind === 'docx' &&
+          state.files[meta.replay + ':pptx']?.status !== 'sent' && !bundledPptx.has(meta.replay))) {
+        needsReview = true; continue;
+      }
+      pending.push(meta);
+      if (meta.kind === 'pptx') bundledPptx.add(meta.replay);
+    }
+    if (!pending.length) return;
+    const data = await zipFiles(tar, path, cache, key, pending);
+    if (!data) {
+      if (pending.length === 1) {
+        console.error('文件 ' + fileId(pending[0]) + ' 单独压缩后仍超过微信附件上限。');
+        needsReview = true; return;
+      }
+      const split = Math.ceil(pending.length / 2);
+      await sendGroup(pending.slice(0, split));
+      await sendGroup(pending.slice(split));
+      return;
+    }
+    const ids = pending.map(fileId);
+    const suffix = createHash('sha256').update(ids.join(',')).digest('hex').slice(0, 12);
+    const name = '课程课件-' + artifact.id + '-' + suffix + '.zip';
+    try { await deliverZipMembers(ids, state, persist, () => send({ meta: { name }, data })); }
     catch {
-      console.error(`附件 ${id} 发送结果未能确认，已暂停这一份；请在微信核对，再用 --resolve ${id}。`);
+      console.error('ZIP ' + name + ' 发送结果未能确认，请核对包内文件记录：' + ids.join(', '));
       needsReview = true;
     }
-  }
+  };
+  for (const group of zipGroups(index.filter(meta => state.files[fileId(meta)]?.status !== 'sent'))) await sendGroup(group);
   if (!needsReview) {
     state.artifacts[artifact.id] = time();
     await persist();
