@@ -8,10 +8,6 @@ on:
         type: choice
         options: [discover, mail-test, run]
         default: discover
-      max_lectures:
-        description: '每次最多处理多少节回放（仅 run 生效，不改变订阅课程）'
-        type: string
-        default: '1'
   schedule:
     - cron: '30 4 * * *' # 12:30 UTC+8
 permissions:
@@ -41,7 +37,6 @@ jobs:
       MAIL_MAX_RAW_MB: ${{ vars.MAIL_MAX_RAW_MB || '18' }}
       DELIVERY: ${{ vars.DELIVERY || 'email' }}
       RELAY_KEY: ${{ secrets.RELAY_KEY }}
-      MAX_LECTURES: ${{ inputs.max_lectures || vars.MAX_LECTURES || '3' }}
       STATE_KEY: ${{ secrets.STATE_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
     name: 查找课程 · 测试邮箱 · 归档订阅

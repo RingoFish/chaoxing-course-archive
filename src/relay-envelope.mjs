@@ -66,7 +66,11 @@ export async function stageRelay(dir, replay, attachments, key) {
     if (size > MAX_FILE) throw new Error('附件超过微信转发端的 100 MiB 上限。');
     total += size + 8192;
     // Leave room for the ZIP directory and the per-file encryption headers.
-    if (total > MAX_ARCHIVE - 1024 * 1024) throw new Error('本轮交接包达到 2 GiB 上限；未上传的附件将在后续运行继续处理。');
+    if (total > MAX_ARCHIVE - 1024 * 1024) {
+      const error = new Error('本轮交接包达到 2 GiB 上限；未上传的附件将在后续运行继续处理。');
+      error.code = 'RELAY_OUTBOX_FULL';
+      throw error;
+    }
     const target = join(dir, relayFilename(key, replay, kind));
     await writeFile(target + '.part', sealRelay(key, { replay, kind, name }, await readFile(path)), { mode: 0o600 });
     await rename(target + '.part', target);

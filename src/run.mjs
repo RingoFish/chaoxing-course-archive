@@ -153,10 +153,6 @@ async function run() {
     throw new Error('邮箱配置不完整，请先设置 SMTP_EMAIL、SMTP_PASSWORD、RECEIVER_EMAIL 并运行 mail-test。');
   }
 
-  const max = Number(process.env.MAX_LECTURES || 3);
-  if (!Number.isInteger(max) || max < 1 || max > 100) {
-    throw new Error('MAX_LECTURES 需为 1 到 100 的整数。');
-  }
   const work = resolve(root, process.env.COURSE_WORK || 'local-data/jobs');
   const runCatalogPath = join(work, 'subscriptions-run.private.json');
   const output = resolve(root, process.env.COURSE_OUTPUT || 'local-data/final');
@@ -192,24 +188,28 @@ async function run() {
     });
 
     await saveJson(runCatalogPath, manifest);
-    const pending = pendingReplays(manifest.replays, state, channels).slice(0, max);
+    const pending = pendingReplays(manifest.replays, state, channels);
+    // Leave time for the workflow to upload staged files and persist receipts.
+    const deadline = hosted ? Date.now() + 270 * 60_000 : Infinity;
     console.log('发现 ' + manifest.replays.length + ' 节已发布回放，本轮处理 ' + pending.length + ' 节。');
 
     let failures = 0;
     for (const [index, replay] of pending.entries()) {
+      const dirTime = deadline - Date.now();
+      if (dirTime < 60_000) { console.log('接近运行时限，剩余回放将在下次继续。'); break; }
       const id = String(replay.speechId);
       if (!/^\d+$/.test(id)) throw new Error('回放编号无效。');
       console.log('开始第 ' + (index + 1) + '/' + pending.length + ' 节。');
+      const dir = join(work, id);
+      const out = join(output, id);
       try {
-        const dir = join(work, id);
-        const out = join(output, id);
         const done = state.completed[id] || {};
         const pptxReady = channels.length ? channels.every(channel => done[channel] || done[`${channel}Pptx`]) : done.pptxBuilt;
         const args = [join(root, 'src/archive-lecture.mjs'), runCatalogPath, id, dir, out];
         if (pptxReady) args.push('--check-transcript');
         const child = exec(process.execPath,
           args,
-          { cwd: root, maxBuffer: 8e6, timeout: 5 * 60 * 60 * 1000, env: process.env });
+          { cwd: root, maxBuffer: 8e6, timeout: Math.min(dirTime, 5 * 60 * 60 * 1000), env: process.env });
         child.child.stderr.on('data', chunk => process.stderr.write(chunk));
         const { stdout } = await child;
         const files = JSON.parse(stdout);
@@ -239,12 +239,18 @@ async function run() {
             '平台暂未提供讲解字幕，下次复查时间 ' + done.transcriptRetryAt + '。');
         } else console.log('第 ' + (index + 1) + ' 节完成：' + files.pages + ' 页课件，' + files.segments + ' 段讲解。');
       } catch (error) {
+        if (error.code === 'RELAY_OUTBOX_FULL') { console.log(error.message); break; }
         failures++;
         // Avoid echoing subprocess command strings containing signed URLs.
         const message = error.stderr
           ? String(error.stderr).trim().split('\n').at(-1)
           : error.killed ? '处理子进程超时。' : error.message;
         console.error('第 ' + (index + 1) + ' 节失败：' + safeMessage(message));
+      } finally {
+        if (hosted && key) {
+          await rm(dir, { recursive: true, force: true });
+          await rm(out, { recursive: true, force: true });
+        }
       }
     }
     if (failures) {

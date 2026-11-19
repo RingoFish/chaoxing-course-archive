@@ -7,7 +7,7 @@ GitHub Actions 登录超星、识别课件、生成 PPTX 和 Word，再把加密
 1. 在自己的 Fork 完成 `discover` 和课程订阅。先完成本机配置，再切换发送方式。
 2. 生成独立随机密钥：`node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`。把相同的 64 位十六进制值保存到 Fork 的 **Settings → Secrets and variables → Actions → Secrets** 中，名称为 `RELAY_KEY`，并另存到本机私有配置。请勿把它提交到仓库。
 3. 同一页面切换到 **Variables → New repository variable**，设 `DELIVERY` 为 `relay`。邮箱 Secrets 可以保留，但 `relay` 不会尝试邮件发送。
-4. 打开 **Actions → 课程订阅与邮件 → Run workflow**，选 `main`、`operation=run`，第一次建议 `max_lectures=1`。如要每天自动归档，在同一 **Variables** 页面设 `RUN_SCHEDULED=true`；可用 `MAX_LECTURES` 限制每次处理节数。开启后也会逐步处理仍未通过此渠道交接的旧回放。
+4. 打开 **Actions → 课程订阅与邮件 → Run workflow**，选 `main`、`operation=run`。如要每天自动归档，在同一 **Variables** 页面设 `RUN_SCHEDULED=true`。手动和定时运行都会处理仍未交接的回放，不限制课节数；本轮加密包接近 2 GiB 或接近运行时限时，先交接已完成的附件，下轮再继续。
 
 ## 在 Windows 配置一次
 

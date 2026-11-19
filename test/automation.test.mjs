@@ -149,8 +149,9 @@ test('Actions default to course discovery and keep video processing separate', a
   const workflow = YAML.parse(raw);
   assert.equal(workflow.on.workflow_dispatch.inputs.operation.default, 'discover');
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.operation.options, ['discover', 'mail-test', 'run']);
-  assert.deepEqual(Object.keys(workflow.on.workflow_dispatch.inputs), ['operation', 'max_lectures']);
+  assert.deepEqual(Object.keys(workflow.on.workflow_dispatch.inputs), ['operation']);
   assert.match(workflow.jobs.course.if, /vars\.RUN_SCHEDULED == 'true'/);
+  assert.equal(workflow.jobs.course.env.MAX_LECTURES, undefined);
   const steps = workflow.jobs.course.steps;
   assert.equal(steps.find(s => s.run === 'node src/run.mjs --discover').if, "env.COURSE_OPERATION == 'discover'");
   assert.equal(steps.find(s => s.run === 'node src/run.mjs --mail-test').if, "env.COURSE_OPERATION == 'mail-test'");

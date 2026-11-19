@@ -129,7 +129,7 @@ export async function processArtifact(config, key, artifact, cache, state, persi
   const tar = process.platform === 'win32' ? join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe') : 'tar';
   const { stdout } = await exec(tar, ['-tf', path], { timeout: 60000, maxBuffer: 128 * 1024 });
   const names = stdout.trim().split(/\r?\n/);
-  if (names.length > 200 || new Set(names).size !== names.length ||
+  if (names.length > 1000 || new Set(names).size !== names.length ||
       names.some(name => !/^[a-f0-9]{64}\.relay$/.test(name))) throw new Error('交接包包含未知文件。');
   const index = [];
   for (const name of names) {
