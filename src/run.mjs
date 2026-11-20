@@ -185,6 +185,7 @@ async function run() {
       headless: process.env.COURSE_HEADLESS !== 'false',
       profile: join(root, 'local-data/browser-profile'),
       onProgress: console.log,
+      onWarning: message => console.warn(hosted ? '::warning::' + message.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A') : '警告：' + message),
     });
 
     await saveJson(runCatalogPath, manifest);

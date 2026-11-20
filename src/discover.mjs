@@ -1,3 +1,4 @@
+import { safeMessage } from './logging.mjs';
 import { chromium } from 'playwright-core';
 import { resolve } from 'node:path';
 import { request } from 'playwright-core';
@@ -41,21 +42,20 @@ export function courseRecordParameters(args, course, state, page = 1) {
   return params;
 }
 
-export function selectCourses(courses, courseIds = []) {
+export function selectCourses(courses, courseIds = [], onWarning = console.warn) {
   const ids = normalizeCourseIds(courseIds);
   if (!ids.length) return courses;
   const byId = new Map(courses.map(course => [String(course.id), course]));
   const missing = ids.filter(id => !byId.has(id));
   if (missing.length) {
-    throw new Error('以下课程 ID 不在当前账号可访问的课程列表中：' + missing.join(', ') +
-      '。请重新执行 discover 检查课程列表和学期。');
+    onWarning('以下订阅课程本轮不可见，已跳过：' + missing.join(', ') + '。订阅保留，下次会再检查。');
   }
-  return ids.map(id => byId.get(id));
+  return ids.flatMap(id => byId.has(id) ? [byId.get(id)] : []);
 }
 
 export async function discover(value, {
   courseIds = [], includeReplays = true,
-  profile, headless = false, onProgress = () => {},
+  profile, headless = false, onProgress = () => {}, onWarning = console.warn,
 } = {}) {
   const entry = new URL(String(value ?? '').trim() || DEFAULT_COURSE_ENTRY_URL);
   if (entry.protocol !== 'https:' || entry.hostname !== COURSE_HOST || !entry.pathname.startsWith('/starcloud/')) {
@@ -96,6 +96,7 @@ export async function discover(value, {
         { form: { ...state, page: String(n) } });
       if (!response.ok()) throw new Error(`课程列表请求失败 HTTP ${response.status()}`);
       const result = await response.json();
+      if (result.status === false) throw new Error('超星拒绝读取课程列表，请检查登录和课程权限。');
       const records = result.data?.arry || result.data?.list || result.arry || result.list || result.modellist || result.data?.modellist;
       if (!Array.isArray(records)) throw new Error('课程列表接口格式变化，已停止而未猜测课程权限。');
       for (const r of records) {
@@ -111,30 +112,36 @@ export async function discover(value, {
       await new Promise(r => setTimeout(r, 350));
       if (n === 200) throw new Error('课程分页超出合理范围。');
     }
-    if (!courses.length) throw new Error('智播课堂返回了空课程列表。请在浏览器核对当前单位、学期和课程权限。');
-    const selectedCourses = selectCourses(courses, courseIds);
+    if (!courses.length) onWarning('智播课堂本轮返回空课程列表；请检查单位、学期和权限。');
+    const selectedCourses = selectCourses(courses, courseIds, onWarning);
     if (!includeReplays) {
       return { schemaVersion: 1, courses: selectedCourses.map(({ enc, ...c }) => c), replays: [] };
     }
     const replays = [];
     for (const [index, course] of selectedCourses.entries()) {
       onProgress('查找第 ' + (index + 1) + '/' + selectedCourses.length + ' 门课的回放');
-      const detail = new URL('/starcloud/getcoursehead', entry);
-      detail.search = new URLSearchParams({ id: String(course.id), enc: course.enc, ut: 's', ischange: 'true' });
-      const response = await context.request.get(detail.href);
-      const { parseArgsDeclaration } = await import('./platform.mjs');
-      const args = parseArgsDeclaration(await response.text());
-      for (let n = 1; n <= 200; n++) {
-        const url = new URL('/starcloud/getclassrecord', entry);
-        url.search = new URLSearchParams(courseRecordParameters(args, course, state, n));
-        const response = await context.request.post(url.href);
-        const result = await response.json(), data = result.data;
-        if (!Array.isArray(data?.arry)) throw new Error('回放列表接口未返回有效课程记录。');
-        replays.push(...publishedReplays(data.arry, course));
-        const size = Number(data.pageInfo?.pagesize || 10), total = Number(data.pageInfo?.totalResult || 0);
-        if (data.arry.length < size || (total && n * size >= total)) break;
-        await new Promise(r => setTimeout(r, 350));
-        if (n === 200) throw new Error('回放分页超出合理范围。');
+      try {
+        const detail = new URL('/starcloud/getcoursehead', entry);
+        detail.search = new URLSearchParams({ id: String(course.id), enc: course.enc, ut: 's', ischange: 'true' });
+        const response = await context.request.get(detail.href);
+        if (!response.ok()) throw new Error('课程详情请求失败（HTTP ' + response.status() + '）。');
+        const { parseArgsDeclaration } = await import('./platform.mjs');
+        const args = parseArgsDeclaration(await response.text());
+        for (let n = 1; n <= 200; n++) {
+          const url = new URL('/starcloud/getclassrecord', entry);
+          url.search = new URLSearchParams(courseRecordParameters(args, course, state, n));
+          const response = await context.request.post(url.href);
+          if (!response.ok()) throw new Error('回放列表请求失败（HTTP ' + response.status() + '）。');
+          const result = await response.json(), data = result.data;
+          if (result.status === false || !Array.isArray(data?.arry)) throw new Error('回放列表接口未返回有效课程记录。');
+          replays.push(...publishedReplays(data.arry, course));
+          const size = Number(data.pageInfo?.pagesize || 10), total = Number(data.pageInfo?.totalResult || 0);
+          if (data.arry.length < size || (total && n * size >= total)) break;
+          await new Promise(r => setTimeout(r, 350));
+          if (n === 200) throw new Error('回放分页超出合理范围。');
+        }
+      } catch (error) {
+        onWarning('课程 ' + course.id + ' 的回放未能查全：' + safeMessage(error.message) + ' 已查到的回放照常处理，其余下次复查。');
       }
     }
     return { schemaVersion: 1, courses: selectedCourses.map(({ enc, ...c }) => c),

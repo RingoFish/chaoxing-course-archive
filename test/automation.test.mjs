@@ -31,7 +31,12 @@ test('course selection uses platform course IDs, not course-name keywords', () =
   ];
   assert.deepEqual(selectCourses(courses, ['30']).map(c => c.id), [30]);
   assert.deepEqual(selectCourses(courses, []).map(c => c.id), [20, 30]);
-  assert.throws(() => selectCourses(courses, ['999']), /不在当前账号可访问/);
+  const warnings = [];
+  const requested = ['30', '999', '20'];
+  assert.deepEqual(selectCourses(courses, requested, msg => warnings.push(msg)).map(c => c.id), [30, 20]);
+  assert.deepEqual(requested, ['30', '999', '20']);
+  assert.match(warnings[0], /跳过.*999.*订阅保留/);
+  assert.deepEqual(selectCourses(courses, ['999'], () => {}), []);
 });
 
 test('course list requests retain the week and signed login name from the page', () => {
