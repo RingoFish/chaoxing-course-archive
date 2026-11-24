@@ -12,7 +12,7 @@ import { MAX_ARCHIVE, MAX_ENVELOPE, MAX_FILE, openRelay, relayFilename, relayKey
 
 const exec = promisify(execFile);
 const API = 'https://api.github.com';
-const MESSAGE_ID = /^\d{1,24}:(pptx|docx)$/;
+const MESSAGE_ID = /^\d{1,24}:(pptx|docx)(:r\d{1,2})?$/;
 const EMPTY = () => ({ artifacts: {}, files: {} });
 
 async function readJson(path, fallback) {
@@ -59,7 +59,7 @@ async function getArtifacts(config) {
   return results.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id - b.id);
 }
 
-async function downloadArtifact(config, artifact, path) {
+export async function downloadArtifact(config, artifact, path) {
   // Fetch the signed download separately so the repository token never goes to storage.
   const response = await fetch(`${API}/repos/${config.repository}/actions/artifacts/${artifact.id}/zip`, {
     headers: { Authorization: `Bearer ${config.githubToken}`, Accept: 'application/vnd.github+json' },
@@ -68,7 +68,7 @@ async function downloadArtifact(config, artifact, path) {
   if (response.status !== 302) throw new Error(`GitHub 产物 ${artifact.id} 下载失败（${response.status}）。`);
   const signed = new URL(response.headers.get('location'));
   if (signed.protocol !== 'https:') throw new Error('GitHub 下载链接不是 HTTPS。');
-  const downloaded = await fetch(signed, { redirect: 'error', signal: AbortSignal.timeout(15 * 60 * 1000) });
+  const downloaded = await fetch(signed, { redirect: 'error', signal: AbortSignal.timeout(2 * 60 * 60 * 1000) });
   if (!downloaded.ok || !downloaded.body) throw new Error(`GitHub 产物 ${artifact.id} 下载未完成。`);
   let length = 0;
   const limit = new Transform({ transform(chunk, _encoding, callback) {
@@ -101,7 +101,7 @@ async function checkWechat(config) {
   return hits[0].username;
 }
 
-const fileId = meta => `${meta.replay}:${meta.kind}`;
+const fileId = meta => `${meta.replay}:${meta.kind}` + (meta.revision ? `:r${meta.revision}` : '');
 
 async function deliverZipMembers(ids, state, persist, send) {
   for (const id of ids) state.files[id] = { status: 'sending', at: time() };
@@ -137,7 +137,9 @@ async function zipFiles(tar, archive, cache, key, entries) {
     for (const meta of entries) {
       const { stdout: blob } = await exec(tar, ['-xOf', archive, meta.entry], { encoding: 'buffer', maxBuffer: MAX_ENVELOPE, timeout: 90000 });
       const { data } = openRelay(key, blob);
-      const name = meta.replay + '-' + meta.name.replace(/[. ]+(?=\.(pptx|docx)$)/i, '');
+      const clean = meta.name.replace(/[. ]+(?=\.(pptx|docx)$)/i, '');
+      // Revision 2 names are already unique per course and lecture number.
+      const name = meta.revision && !names.includes(clean) ? clean : meta.replay + '-' + clean;
       names.push(name);
       await writeFile(join(temp, name), data, { mode: 0o600, flag: 'wx' });
     }
@@ -173,7 +175,7 @@ export async function processArtifact(config, key, artifact, cache, state, persi
     if (relayFilename(key, meta.replay, meta.kind) !== name) throw new Error('交接包文件名与内容不匹配。');
     index.push({ ...meta, entry: name, bytes: data.length });
   }
-  index.sort((a, b) => a.kind === b.kind ? a.replay.localeCompare(b.replay) : a.kind === 'pptx' ? -1 : 1);
+  index.sort((a, b) => a.kind === b.kind ? a.name.localeCompare(b.name, 'zh-CN', { numeric: true }) || a.replay.localeCompare(b.replay) : a.kind === 'pptx' ? -1 : 1);
   let needsReview = false;
   const sendGroup = async group => {
     const pending = [];
@@ -182,7 +184,7 @@ export async function processArtifact(config, key, artifact, cache, state, persi
       const id = fileId(meta);
       if (state.files[id]?.status === 'sent') continue;
       if (state.files[id]?.status === 'sending' || (meta.kind === 'docx' &&
-          state.files[meta.replay + ':pptx']?.status !== 'sent' && !bundledPptx.has(meta.replay))) {
+          state.files[fileId({ ...meta, kind: 'pptx' })]?.status !== 'sent' && !bundledPptx.has(meta.replay))) {
         needsReview = true; continue;
       }
       pending.push(meta);
@@ -249,7 +251,7 @@ async function main() {
     if (args.resolve) {
       const id = args.resolve;
       if (!MESSAGE_ID.test(id) || state.files[id]?.status !== 'sending' || Boolean(args.sent) === Boolean(args.retry)) {
-        throw new Error('用 --resolve 回放ID:pptx --sent 或 --retry 处理待核对记录。');
+        throw new Error('用 --resolve 回放ID:pptx[:r2] --sent 或 --retry 处理待核对记录。');
       }
       if (args.sent) state.files[id] = { status: 'sent', at: time() };
       else delete state.files[id];

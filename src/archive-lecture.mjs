@@ -47,7 +47,8 @@ async function archiveLecture(catalogPath, id, dir, output, mode) {
   await saveJson(join(dir, 'timeline.json'), extracted);
   const lesson = await prepareAutomatically(dir);
   log(`自动整理完成：${lesson.pages.length} 页课件，${lesson.transcript.length} 段讲解`);
-  const files = await exportFiles(dir, lesson, output, { includeDocx: !transcriptPending });
+  const files = await exportFiles(dir, lesson, output, { includeDocx: !transcriptPending,
+    course: replay.course || result.metadata.course, number: replay.number });
   console.log(JSON.stringify({ ...files, transcriptPending, pages: lesson.pages.length, segments: lesson.transcript.length }, null, 2));
 }
 

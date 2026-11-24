@@ -4,7 +4,8 @@ import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
 import { publishedReplays, courseListParameters, courseRecordParameters, selectCourses } from '../src/discover.mjs';
 import { encryptLoginField, loginWithSecrets } from '../src/auth.mjs';
 import { encryptState, decryptState, loadRemoteState, saveRemoteState, statePassword, mergeState } from '../src/state.mjs';
-import { courseDiscoverySummary, deliveryChannels, deliveryFiles, pendingReplays, recordRelayUploads } from '../src/run.mjs';
+import { abandonedReason, courseDiscoverySummary, deliveryChannels, deliveryFiles, lectureNumbers, migrateNaming, pendingReplays, recordRelayUploads } from '../src/run.mjs';
+import { lectureFileNames } from '../src/export.mjs';
 import { safeMessage } from '../src/logging.mjs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -192,4 +193,47 @@ test('course discovery pairs each name with its ID and links to the current fork
 test('network logs hide signed URLs and Playwright request dumps', () => {
   const log = 'apiRequestContext.get: timeout for https://school.example/replay?enc=token\nCall log:\n  - cookie: session-secret';
   assert.equal(safeMessage(log), 'apiRequestContext.get: timeout for [链接已隐藏]');
+});
+
+test('lectures are numbered per course in teaching order and named for the friend', () => {
+  const numbers = lectureNumbers([
+    { speechId: 30, courseId: 'a', date: '2026-10-08', lesson: '1-2' },
+    { speechId: 10, courseId: 'a', date: '2026-10-01', lesson: '3-4' },
+    { speechId: 20, courseId: 'a', date: '2026-10-01', lesson: '1-2' },
+    { speechId: 40, courseId: 'b', date: '2026-09-01', lesson: '5' },
+  ]);
+  assert.deepEqual(Object.fromEntries(numbers), { 20: 1, 10: 2, 30: 3, 40: 1 });
+  assert.deepEqual(lectureFileNames('物理化学', 1), { pptx: '物理化学 课件 01.pptx', docx: '物理化学 讲义 01.docx' });
+  assert.equal(lectureFileNames('文学/研读 ', 112).docx, '文学_研读 讲义 112.docx');
+});
+
+test('lectures failing or missing transcripts for a week are no longer retried', () => {
+  const now = Date.parse('2026-11-24T00:00:00Z');
+  const day = 24 * 60 * 60 * 1000;
+  const iso = offset => new Date(now - offset).toISOString();
+  const replays = [1, 2, 3, 4].map(speechId => ({ speechId, date: '2026-11-01' }));
+  const state = { completed: {
+    1: { failedSince: iso(8 * day) },
+    2: { failedSince: iso(2 * day) },
+    3: { relayPptx: 't', pptxBuilt: iso(8 * day), transcriptRetryAt: iso(day) },
+    4: { relayPptx: 't', pptxBuilt: iso(3 * day), transcriptRetryAt: iso(day) },
+  } };
+  assert.deepEqual(pendingReplays(replays, state, ['relay'], now).map(r => r.speechId).sort(), [2, 4]);
+  assert.equal(abandonedReason(state.completed[1], ['relay'], now), 'failed');
+  assert.equal(abandonedReason(state.completed[3], ['relay'], now), 'transcript');
+  assert.equal(abandonedReason({ ...state.completed[3], transcriptPendingSince: iso(day) }, ['relay'], now), null);
+});
+
+test('deliveries made under the old names are queued once for a full resend', () => {
+  const state = { completed: {
+    1: { relay: 'a', relayPptx: 'b', built: 'c' },
+    2: { relayPptx: 'b', pptxBuilt: 'b', transcriptRetryAt: '2026-11-20T00:00:00Z' },
+    3: { failedSince: '2026-11-20T00:00:00Z' },
+  } };
+  assert.equal(migrateNaming(state), 2);
+  assert.equal(migrateNaming(state), 0);
+  assert.deepEqual(state.completed[1], { relay: null, relayPptx: null, relayV1: 'a', relayPptxV1: 'b', built: 'c', naming: 2 });
+  const replays = [1, 2, 3].map(speechId => ({ speechId }));
+  assert.deepEqual(pendingReplays(replays, state, ['relay'], Date.parse('2026-11-19T00:00:00Z')).map(r => r.speechId).sort(), [1, 2, 3]);
+  assert.deepEqual(mergeState({ completed: { 1: { relay: 'a' } } }, state).completed[1].relay, null);
 });

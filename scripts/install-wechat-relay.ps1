@@ -17,7 +17,7 @@ $action = New-ScheduledTaskAction -Execute $shell -Argument $arguments -WorkingD
 $atLogon = New-ScheduledTaskTrigger -AtLogOn -User $owner
 $recurring = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 $principal = New-ScheduledTaskPrincipal -UserId $owner -LogonType Interactive -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 4) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 if ($Disabled) { $settings.Enabled = $false }
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($atLogon, $recurring) -Principal $principal -Settings $settings -Description 'Retrieve encrypted course output and deliver it using the local WeChat sender.' -Force | Out-Null
 Get-ScheduledTask -TaskName $TaskName | Select-Object TaskName,State

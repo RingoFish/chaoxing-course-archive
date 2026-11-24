@@ -7,6 +7,9 @@ export const MAX_FILE = 100 * 1024 * 1024;
 export const MAX_ENVELOPE = MAX_FILE + 8192;
 export const MAX_ARCHIVE = 2 * 1024 * 1024 * 1024;
 export const RELAY_DIR = 'local-data/relay-outbox';
+// Revision 2 marks files using the "<course> 课件/讲义 NN" names; the relay
+// tracks it separately so earlier deliveries do not suppress the resend.
+export const RELAY_REVISION = 2;
 
 export function relayKey(encoded) {
   if (!/^[a-f0-9]{64}$/i.test(encoded || '')) throw new Error('RELAY_KEY 需要 64 位十六进制随机值。');
@@ -21,7 +24,8 @@ function validate(meta) {
   if (typeof meta?.replay !== 'string' || !/^\d{1,24}$/.test(meta.replay) ||
       !['pptx', 'docx'].includes(meta.kind) || typeof meta.name !== 'string' ||
       !meta.name || meta.name.length > 180 || /[<>:"/\\|?*\x00-\x1f]/.test(meta.name) ||
-      extname(meta.name).toLowerCase() !== '.' + meta.kind) throw new Error('加密附件的标识或文件名无效。');
+      extname(meta.name).toLowerCase() !== '.' + meta.kind ||
+      (meta.revision !== undefined && (!Number.isInteger(meta.revision) || meta.revision < 2 || meta.revision > 99))) throw new Error('加密附件的标识或文件名无效。');
 }
 
 export function sealRelay(key, meta, data) {
@@ -72,7 +76,7 @@ export async function stageRelay(dir, replay, attachments, key) {
       throw error;
     }
     const target = join(dir, relayFilename(key, replay, kind));
-    await writeFile(target + '.part', sealRelay(key, { replay, kind, name }, await readFile(path)), { mode: 0o600 });
+    await writeFile(target + '.part', sealRelay(key, { replay, kind, name, revision: RELAY_REVISION }, await readFile(path)), { mode: 0o600 });
     await rename(target + '.part', target);
   }
 }

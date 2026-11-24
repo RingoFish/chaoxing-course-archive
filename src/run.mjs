@@ -26,6 +26,40 @@ export function deliveryChannels(value) {
   return mode === 'both' ? ['email', 'qq'] : mode === 'none' ? [] : [mode];
 }
 
+const GIVE_UP_MS = 7 * 24 * 60 * 60 * 1000;
+export const NAMING_REVISION = 2;
+const RECEIPTS = ['email', 'qq', 'relay'].flatMap(channel => [channel, `${channel}Pptx`]);
+
+// Deliveries made before the "<course> 课件/讲义 NN" names are queued again once.
+// Receipts become null instead of being deleted so mergeState keeps the reset.
+export function migrateNaming(state) {
+  let count = 0;
+  for (const done of Object.values(state.completed)) {
+    if (Number(done.naming || 1) >= NAMING_REVISION) continue;
+    let delivered = false;
+    for (const receipt of RECEIPTS) {
+      if (!done[receipt]) continue;
+      done[`${receipt}V1`] = done[receipt];
+      done[receipt] = null;
+      delivered = true;
+    }
+    done.naming = NAMING_REVISION;
+    if (delivered) count++;
+  }
+  return count;
+}
+
+const expired = (since, now) => now - Date.parse(since) >= GIVE_UP_MS;
+
+// A replay that keeps failing, or whose transcript stays empty after the PPTX
+// went out, is retried for a week and then left alone without failing the run.
+export function abandonedReason(done, channels, now = Date.now()) {
+  if (expired(done.failedSince, now)) return 'failed';
+  const pptxDone = channels.length ? channels.every(channel => done[channel] || done[`${channel}Pptx`]) : done.pptxBuilt;
+  if (done.transcriptRetryAt && pptxDone && expired(done.transcriptPendingSince || done.pptxBuilt, now)) return 'transcript';
+  return null;
+}
+
 export function pendingReplays(replays, state, channels, now = Date.now()) {
   const due = replay => {
     const retryAt = Date.parse(state.completed?.[String(replay.speechId)]?.transcriptRetryAt);
@@ -35,6 +69,7 @@ export function pendingReplays(replays, state, channels, now = Date.now()) {
     const done = state.completed?.[String(replay.speechId)] || {};
     const remaining = channels.filter(channel => !done[channel]);
     if (channels.length ? !remaining.length : done.built) return false;
+    if (abandonedReason(done, channels, now)) return false;
     if (!(Date.parse(done.transcriptRetryAt) > now)) return true;
     return channels.length ? remaining.some(channel => !done[`${channel}Pptx`]) : !done.pptxBuilt;
   }).sort((a, b) => {
@@ -42,6 +77,24 @@ export function pendingReplays(replays, state, channels, now = Date.now()) {
     if (aDue !== bDue) return aDue < bDue ? -1 : 1;
     return String(b.date || '').localeCompare(String(a.date || '')) || Number(b.speechId) - Number(a.speechId);
   });
+}
+
+// Number each course's published replays in teaching order: 01, 02, ...
+export function lectureNumbers(replays) {
+  const courses = new Map();
+  for (const replay of replays) {
+    const key = String(replay.courseId ?? replay.course ?? '');
+    if (!courses.has(key)) courses.set(key, []);
+    courses.get(key).push(replay);
+  }
+  const start = lesson => Number.parseInt(String(lesson || '').match(/\d+/)?.[0] ?? 'NaN', 10);
+  const numbers = new Map();
+  for (const list of courses.values()) {
+    list.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')) ||
+      (start(a.lesson) || 0) - (start(b.lesson) || 0) || Number(a.speechId) - Number(b.speechId));
+    list.forEach((replay, index) => numbers.set(String(replay.speechId), index + 1));
+  }
+  return numbers;
 }
 
 export function deliveryFiles(files, done, channel) {
@@ -135,6 +188,7 @@ async function run() {
   if (operation !== 'run') throw new Error('COURSE_OPERATION 只能是 discover、mail-test 或 run。');
 
   const hosted = process.env.GITHUB_ACTIONS === 'true';
+  const warn = message => console.warn(hosted ? '::warning::' + message.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A') : '警告：' + message);
   const courseIds = await resolveCourseSelection();
   if (!courseIds.length) throw new Error(hosted
     ? '尚无订阅课程。请先执行 discover，再编辑 data 分支的 data/subscriptions.json。'
@@ -185,10 +239,21 @@ async function run() {
       headless: process.env.COURSE_HEADLESS !== 'false',
       profile: join(root, 'local-data/browser-profile'),
       onProgress: console.log,
-      onWarning: message => console.warn(hosted ? '::warning::' + message.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A') : '警告：' + message),
+      onWarning: warn,
     });
 
+    const numbers = lectureNumbers(manifest.replays);
+    for (const replay of manifest.replays) replay.number = numbers.get(String(replay.speechId));
     await saveJson(runCatalogPath, manifest);
+    const renamed = migrateNaming(state);
+    if (renamed) console.log('按新文件名重新发送 ' + renamed + ' 节已发过的课件。');
+    const abandoned = { failed: 0, transcript: 0 };
+    for (const replay of manifest.replays) {
+      const reason = abandonedReason(state.completed[String(replay.speechId)] || {}, channels);
+      if (reason) abandoned[reason]++;
+    }
+    if (abandoned.failed) console.log(abandoned.failed + ' 节连续失败已满 7 天，不再重试。');
+    if (abandoned.transcript) console.log(abandoned.transcript + ' 节字幕满 7 天仍为空，只保留已发的课件。');
     const pending = pendingReplays(manifest.replays, state, channels);
     // Leave time for the workflow to upload staged files and persist receipts.
     const deadline = hosted ? Date.now() + 270 * 60_000 : Infinity;
@@ -203,8 +268,8 @@ async function run() {
       console.log('开始第 ' + (index + 1) + '/' + pending.length + ' 节。');
       const dir = join(work, id);
       const out = join(output, id);
+      const done = state.completed[id] || {};
       try {
-        const done = state.completed[id] || {};
         const pptxReady = channels.length ? channels.every(channel => done[channel] || done[`${channel}Pptx`]) : done.pptxBuilt;
         const args = [join(root, 'src/archive-lecture.mjs'), runCatalogPath, id, dir, out];
         if (pptxReady) args.push('--check-transcript');
@@ -216,6 +281,9 @@ async function run() {
         const files = JSON.parse(stdout);
         const timestamp = new Date().toISOString();
         state.completed[id] = done;
+        done.transcriptPendingSince = files.transcriptPending
+          ? done.transcriptPendingSince || (done.transcriptRetryAt && done.pptxBuilt) || timestamp : null;
+        done.failedSince = null;
         if (files.pptx) done.pptxBuilt = timestamp;
         if (files.docx) done.built = timestamp;
         done.transcriptRetryAt = files.transcriptPending ? new Date(Date.now() + TRANSCRIPT_RETRY_MS).toISOString() : null;
@@ -246,7 +314,13 @@ async function run() {
         const message = error.stderr
           ? String(error.stderr).trim().split('\n').at(-1)
           : error.killed ? '处理子进程超时。' : error.message;
-        console.error('第 ' + (index + 1) + ' 节失败：' + safeMessage(message));
+        warn('第 ' + (index + 1) + ' 节失败：' + safeMessage(message) + '（连续失败满 7 天后不再重试）');
+        state.completed[id] = done;
+        done.failedSince ||= new Date().toISOString();
+        try {
+          await saveJson(ledger, state);
+          await saveRemoteState(ledger);
+        } catch (saveError) { warn('失败记录暂未保存：' + safeMessage(saveError.message)); }
       } finally {
         if (hosted && key) {
           await rm(dir, { recursive: true, force: true });
@@ -254,10 +328,8 @@ async function run() {
         }
       }
     }
-    if (failures) {
-      throw new Error(failures + ' 节处理或发送失败，成功记录已保存；重跑会继续未完成项。');
-    }
-    console.log('本轮完成。');
+    // Per-lecture failures are retried for a week and must not fail the run.
+    console.log(failures ? '本轮完成，' + failures + ' 节未成功，下次继续重试。' : '本轮完成。');
   } finally {
     await handle.close();
     await rm(lock, { force: true });

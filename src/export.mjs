@@ -70,10 +70,19 @@ export async function writeArtifactPptx(directory, lesson, target) {
   } else await (await PresentationFile.exportPptx(presentation)).save(target);
 }
 
-export async function exportFiles(directory, lesson, output, { includeDocx = true } = {}) {
+// Friend-facing names: "<course> 课件 01.pptx" (slides only) and
+// "<course> 讲义 01.docx" (screenshots with the platform transcript).
+export function lectureFileNames(course, number = 1) {
+  const name = String(course || '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/\s+/g, ' ').trim()
+    .slice(0, 120).replace(/[. ]+$/, '') || '未命名课程';
+  const index = String(Number.isSafeInteger(Number(number)) && Number(number) > 0 ? Number(number) : 1).padStart(2, '0');
+  return { pptx: `${name} 课件 ${index}.pptx`, docx: `${name} 讲义 ${index}.docx` };
+}
+
+export async function exportFiles(directory, lesson, output, { includeDocx = true, course, number } = {}) {
   await mkdir(output, { recursive: true });
-  const stem = `${lesson.metadata.course}_${lesson.metadata.date}_第${lesson.metadata.lesson}节`.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_');
-  const pptx = resolve(output, stem + '_课件.pptx'), docx = resolve(output, stem + '_图文讲义.docx');
+  const names = lectureFileNames(course || lesson.metadata.course, number);
+  const pptx = resolve(output, names.pptx), docx = resolve(output, names.docx);
   if (process.env.COURSE_ARTIFACT_MODULE) await writeArtifactPptx(directory, lesson, pptx);
   else await writePptx(directory, lesson, pptx);
   if (!includeDocx) return { pptx };

@@ -2,6 +2,8 @@
 
 GitHub Actions 登录超星、识别课件、生成 PPTX 和 Word，再把加密附件放入本次运行的 **Artifacts**。Windows 电脑只下载、解密、发送。Windows 无需安装 FFmpeg 或语音模型，也无需填超星账号密码。
 
+日常操作和未收到附件的排查顺序见[维护说明](maintenance/README.md)。
+
 ## 在 GitHub 设置
 
 1. 在自己的 Fork 完成 `discover` 和课程订阅。先完成本机配置，再切换发送方式。
@@ -37,12 +39,15 @@ node scripts/wechat-relay.mjs --check
 
 计划任务在当前 Windows 用户登录后每 15 分钟取件，无需保持终端打开。Windows 注销、睡眠或本机微信不可用时不会发送；恢复后下次运行继续。也可在机器上手动运行 `node scripts/wechat-relay.mjs` 立即取件。
 
+每个加密交接包的完整下载最多等待 2 小时，适用于较大的历史课件包；安装脚本将计划任务的总运行时限设为 4 小时，为解密、打包和发送留出时间。已有任务更新脚本后，还需将任务设置中的「运行时间超过以下值时停止任务」调到 4 小时，保留原来的触发时间和代理启动方式。
+
 令牌暂时不可用时，可以在已经登录 GitHub 的电脑下载 Actions 里的加密 ZIP（无需解压），把它以 GitHub 产物 ID 命名为 `<产物ID>.zip`，放到 Windows 配置文件同级的 `inbox` 文件夹中，然后运行 `node scripts/wechat-relay.mjs --inbox-only`。这种方式仍核对绑定的联系人、文件真实性和本机发送记录，只处理已放入收件箱的文件。
 
 ## 补发、确认和限制
 
 - GitHub 与 Windows 分别记账。GitHub 只在加密包上传成功后记录已交接；本机按「回放 ID + PPTX / Word」分别记录微信发送。重新运行不会重复发送已确认的附件。
+- ZIP 内文件名为 `课程名 课件 01.pptx` 和 `课程名 讲义 01.docx`。0.1.0-alpha.11 起交接文件带命名版本 2，本机记为 `1234:pptx:r2`，与旧名记录分开；因此升级后已发过的课节会按新名重发一次。**先更新 Windows 转发脚本，再更新 Fork**，否则旧脚本会把新名文件当成已发送并跳过。
 - 字幕未生成时可以先发 PPTX。平台字幕出现后，下一次到期复查只交接 Word。
 - 微信收到的是普通 ZIP，一包可包含多节课的 PPTX 和 Word。超过单包上限时，会拆成多个可独立解压的 ZIP。单份课件压缩后仍超过 100 MiB 时，转发会保留该文件待处理。Actions 的加密产物保留 30 天；下载到本机的加密包可继续处理。要保留已发送记录，请勿删除本机 `state.json`。本机下载的压缩包在发送完成后清理。
-- 本机 `latest.stderr.log` 和 `previous-error.log` 可用于检查发送失败。若日志写明结果不确定，先在微信确认该 ZIP 是否发出，再按日志列出的文件编号逐一核对，再执行 `node scripts/wechat-relay.mjs --resolve 1234:pptx --sent`（已经发出）或 `node scripts/wechat-relay.mjs --resolve 1234:pptx --retry`（确定没发出）。Word 用 `1234:docx`。微信拒绝发送草稿尚未清空的聊天；先处理草稿再重试。
+- 本机 `latest.stderr.log` 和 `previous-error.log` 可用于检查发送失败。若日志写明结果不确定，先在微信确认该 ZIP 是否发出，再按日志列出的文件编号逐一核对，再执行 `node scripts/wechat-relay.mjs --resolve 1234:pptx --sent`（已经发出）或 `node scripts/wechat-relay.mjs --resolve 1234:pptx --retry`（确定没发出）。Word 用 `1234:docx`；新命名的文件加 `:r2`，如 `1234:pptx:r2`。微信拒绝发送草稿尚未清空的聊天；先处理草稿再重试。
 - 若上次突然中断且留下 `run.lock`，确认计划任务和手动脚本都已停止后再移除它。此前开始但没有确认的附件仍需核对。
